@@ -1,5 +1,5 @@
-# screnshot-via-email
-screnshot-via-email using brevo and screen-shot.xyz
+# screnshot-via-email 
+screnshot-via-email using cloudflare workers brevo and screen-shot.xyz
  # Eeviroment variables you'll need
  # your brevo api key
  BREVO_API_KEY
