@@ -1,6 +1,6 @@
 import PostalMime from 'postal-mime';
 
-/* ---------------- types ---------------- */
+/* ================= types ================= */
 
 interface ForwardableEmailMessage {
   from: string;
@@ -20,11 +20,11 @@ interface Env {
   BREVO_FROM_EMAIL: string;
 }
 
-/* ---------------- config ---------------- */
+/* ================= config ================= */
 
 const CONFIG = {
   SCREENSHOT_DELAY: 5,
-  FETCH_TIMEOUT: 45_000,
+  FETCH_TIMEOUT: 60_000, // ⬅️ safer
   BASE64_CHUNK_SIZE: 0x8000,
   MAX_EMAIL_SIZE: 10 * 1024 * 1024,
   MAX_BREVO_BASE64_CHARS: 9_500_000,
@@ -37,34 +37,18 @@ export default {
     const reqId = crypto.randomUUID();
     const log = (...a: any[]) => console.log(`[${reqId}]`, ...a);
 
-    log('📨 EMAIL RECEIVED');
-    log('From:', message.from);
-    log('To:', message.to);
-    log('Raw size:', message.rawSize);
-
     try {
-      // ---------- env validation ----------
-      log('🔎 Checking env vars');
-      if (!env.SCREENSHOT_API_BASE) log('❌ SCREENSHOT_API_BASE missing');
-      if (!env.BREVO_API_KEY) log('❌ BREVO_API_KEY missing');
-      if (!env.BREVO_FROM_EMAIL) log('❌ BREVO_FROM_EMAIL missing');
+      log('📨 Email received');
 
       if (!env.SCREENSHOT_API_BASE || !env.BREVO_API_KEY || !env.BREVO_FROM_EMAIL) {
         throw new Error('Missing env vars');
       }
 
-      // ---------- size check ----------
       if (message.rawSize > CONFIG.MAX_EMAIL_SIZE) {
-        log('❌ Email too large, rejecting');
         throw new Error('Email too large');
       }
 
-      // ---------- parse MIME ----------
-      log('📦 Reading raw email stream');
       const raw = await readStream(message.raw);
-      log('📦 Raw bytes read:', raw.length);
-
-      log('🧵 Parsing MIME');
       const parser = new PostalMime();
       const email = await parser.parse(raw);
 
@@ -72,79 +56,76 @@ export default {
       const from = extractEmail(email.from?.address || message.from);
       const device = detectDevice(subject);
 
-      log('✉️ Parsed fields:', { subject, from, device });
+      const body =
+        email.text ||
+        stripHtml(email.html || '');
 
-      const bodyText = email.text || '';
-      const bodyHtml = email.html || '';
-
-      log('📝 Body sizes:', {
-        text: bodyText.length,
-        html: bodyHtml.length,
-      });
-
-      const url =
-        extractUrl(bodyText) ||
-        extractUrl(stripHtml(bodyHtml));
-
+      const url = extractUrl(body);
       if (!url) {
-        log('⚠️ No URL found in email body');
-        ctx.waitUntil(
-          sendBrevo({
-            env,
-            to: from,
-            subject: subject || device,
-            text: 'No URL found in your email. Please include a valid link.',
-            reqId,
-          })
-        );
+        ctx.waitUntil(sendBrevo({
+          env,
+          to: from,
+          subject: subject || device,
+          text: 'No URL found in your email.',
+        }));
         return;
       }
-
-      log('🔗 Extracted URL:', url);
 
       const normalized = normalizeUrl(url);
-      if (!normalized) {
-        log('❌ URL normalization failed');
-      } else {
-        log('🌐 Normalized URL:', normalized.toString());
-      }
-
       if (!normalized || isPrivateHost(normalized.hostname)) {
-        log('🚫 URL blocked (invalid or private host)', normalized?.hostname);
-        ctx.waitUntil(
-          sendBrevo({
-            env,
-            to: from,
-            subject: subject || device,
-            text: 'The provided URL is invalid or not allowed.',
-            reqId,
-          })
-        );
+        ctx.waitUntil(sendBrevo({
+          env,
+          to: from,
+          subject: subject || device,
+          text: 'The provided URL is invalid or not allowed.',
+        }));
         return;
       }
 
-      // ---------- background work ----------
-      log('⏳ Deferring screenshot + email via waitUntil');
-
       ctx.waitUntil(
-        processScreenshotAndSend({
+        safeBackgroundJob(
+          processScreenshotAndSend({
+            env,
+            from,
+            subject,
+            device,
+            normalized,
+            reqId,
+          }),
           env,
           from,
           subject,
-          device,
-          normalized,
-          reqId,
-        })
+          device
+        )
       );
 
-      log('✅ Email handler finished (background running)');
     } catch (err) {
-      log('🔥 WORKER ERROR', err);
+      log('🔥 Worker error', err);
     }
   },
 };
 
 /* ================= background ================= */
+
+async function safeBackgroundJob(
+  job: Promise<void>,
+  env: Env,
+  to: string,
+  subject: string,
+  device: string
+) {
+  try {
+    await job;
+  } catch (err) {
+    console.error('💥 Background failure', err);
+    await sendBrevo({
+      env,
+      to,
+      subject: subject || device,
+      text: 'Screenshot failed or timed out. Please try again.',
+    });
+  }
+}
 
 async function processScreenshotAndSend({
   env,
@@ -163,60 +144,53 @@ async function processScreenshotAndSend({
 }) {
   const log = (...a: any[]) => console.log(`[${reqId}]`, ...a);
 
-  log('📸 Starting screenshot job');
-  log('Device:', device);
-  log('URL:', normalized.toString());
+  log('📸 Screenshot start');
 
-  // ---------- screenshot ----------
-  const screenshotUrl = new URL(env.SCREENSHOT_API_BASE);
-  screenshotUrl.pathname = screenshotUrl.pathname.replace(/\/$/, '') + '/take';
+  const screenshotUrl = new URL(env.SCREENSHOT_API_BASE.replace(/\/$/, '') + '/take');
   screenshotUrl.searchParams.set('url', normalized.toString());
   screenshotUrl.searchParams.set('device', device);
   screenshotUrl.searchParams.set('delay', CONFIG.SCREENSHOT_DELAY.toString());
   screenshotUrl.searchParams.set('type', 'jpeg');
   screenshotUrl.searchParams.set('fullPage', 'true');
 
-  log('🛰 Screenshot API URL:', screenshotUrl.toString());
-
   const controller = new AbortController();
-  const timeout = setTimeout(() => {
-    log('⏰ Screenshot fetch timeout');
-    controller.abort();
-  }, CONFIG.FETCH_TIMEOUT);
+  const timeout = setTimeout(() => controller.abort(), CONFIG.FETCH_TIMEOUT);
 
-  const res = await fetch(screenshotUrl.toString(), {
-    signal: controller.signal,
-    headers: { 'User-Agent': 'CF-Email-Screenshot/1.0' },
-  });
-
-  clearTimeout(timeout);
-
-  log('📡 Screenshot response:', res.status);
+  let res: Response;
+  try {
+    res = await fetch(screenshotUrl.toString(), {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'CF-Email-Screenshot/1.0' },
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!res.ok) {
     throw new Error(`Screenshot API failed ${res.status}`);
   }
 
-  const imageBuffer = await res.arrayBuffer();
-  log('🖼 Screenshot bytes:', imageBuffer.byteLength);
+  const buffer = await res.arrayBuffer();
 
-  const imageBase64 = arrayBufferToBase64(imageBuffer);
-  log('🧬 Base64 length:', imageBase64.length);
+  if (buffer.byteLength === 0) {
+    throw new Error('Screenshot returned 0 bytes');
+  }
 
-  if (imageBase64.length > CONFIG.MAX_BREVO_BASE64_CHARS) {
-    log('⚠️ Screenshot too large for Brevo');
+  const base64 = arrayBufferToBase64(buffer);
+
+  if (!base64 || base64.length === 0) {
+    throw new Error('Base64 conversion failed');
+  }
+
+  if (base64.length > CONFIG.MAX_BREVO_BASE64_CHARS) {
     await sendBrevo({
       env,
       to: from,
       subject: subject || device,
-      text: 'Screenshot too large to send by email. Try "mobile" or "tablet".',
-      reqId,
+      text: 'Screenshot too large to email. Try mobile or tablet.',
     });
     return;
   }
-
-  // ---------- send email ----------
-  log('📤 Sending email via Brevo');
 
   await sendBrevo({
     env,
@@ -224,19 +198,18 @@ async function processScreenshotAndSend({
     subject: subject || device,
     text: `Here is your screenshot.\n\nDevice: ${device}\nURL: ${normalized}`,
     attachment: {
-      content: imageBase64,
+      content: base64,
       name: `screenshot-${device}.jpeg`,
       type: 'image/jpeg',
     },
-    reqId,
   });
 
-  log('✅ Screenshot email sent successfully');
+  log('✅ Screenshot email sent');
 }
 
 /* ================= helpers ================= */
 
-async function readStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+async function readStream(stream: ReadableStream<Uint8Array>) {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
@@ -260,64 +233,6 @@ async function readStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Arra
   return result;
 }
 
-function extractEmail(input: string): string {
-  const m = input.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  return m ? m[0] : input;
-}
-
-function extractUrl(text: string): string | null {
-  if (!text) return null;
-
-  const patterns = [
-    /https?:\/\/[^\s<>"']+/gi,
-    /\bwww\.[^\s<>"']+/gi,
-    /\b[a-z0-9-]+(\.[a-z0-9-]+)+[^\s<>"']*/gi,
-  ];
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) {
-      return match[0].replace(/[.,;:!?]+$/, '');
-    }
-  }
-
-  return null;
-}
-
-function stripHtml(html: string): string {
-  return html.replace(/<[^>]+>/g, ' ');
-}
-
-function detectDevice(subject: string): 'desktop' | 'tablet' | 'mobile' {
-  const m = subject.toLowerCase().match(/\b(desktop|tablet|mobile)\b/);
-  return (m?.[1] as any) || 'desktop';
-}
-
-function normalizeUrl(input: string): URL | null {
-  try {
-    let url = input.trim();
-    if (!/^[a-z]+:\/\//i.test(url)) url = 'https://' + url;
-    const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function isPrivateHost(host: string): boolean {
-  if (host === 'localhost') return true;
-  const m = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (!m) return false;
-  const [a, b] = m.slice(1).map(Number);
-  return (
-    a === 10 ||
-    a === 127 ||
-    (a === 192 && b === 168) ||
-    (a === 172 && b >= 16 && b <= 31)
-  );
-}
-
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = '';
@@ -327,37 +242,64 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+function extractEmail(input: string) {
+  return input.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || input;
+}
+
+function extractUrl(text: string) {
+  return text.match(/https?:\/\/[^\s<>"']+|\bwww\.[^\s<>"']+/i)?.[0] || null;
+}
+
+function stripHtml(html: string) {
+  return html.replace(/<[^>]+>/g, ' ');
+}
+
+function detectDevice(subject: string) {
+  return subject.toLowerCase().match(/\b(desktop|tablet|mobile)\b/)?.[1] as any || 'desktop';
+}
+
+function normalizeUrl(input: string) {
+  try {
+    if (!/^[a-z]+:\/\//i.test(input)) input = 'https://' + input;
+    const u = new URL(input);
+    return ['http:', 'https:'].includes(u.protocol) ? u : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPrivateHost(host: string) {
+  if (host === 'localhost') return true;
+  const m = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return false;
+  const [a, b] = m.slice(1).map(Number);
+  return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+}
+
+/* ================= brevo ================= */
+
 async function sendBrevo({
   env,
   to,
   subject,
   text,
   attachment,
-  reqId,
 }: {
   env: Env;
   to: string;
   subject: string;
   text: string;
   attachment?: { content: string; name: string; type: string };
-  reqId: string;
 }) {
-  console.log(`[${reqId}] 📧 Brevo send start`, { to, subject });
-
   const payload: any = {
     sender: { email: env.BREVO_FROM_EMAIL, name: 'Screenshot Service' },
-    replyTo: { email: env.BREVO_FROM_EMAIL, name: 'Screenshot Service' },
     to: [{ email: to }],
     subject,
     textContent: text,
   };
 
-  if (attachment) {
+  if (attachment?.content) {
     payload.attachment = [attachment];
-    console.log(`[${reqId}] 📎 Attachment added`, {
-      name: attachment.name,
-      size: attachment.content.length,
-    });
   }
 
   const res = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -369,13 +311,8 @@ async function sendBrevo({
     body: JSON.stringify(payload),
   });
 
-  console.log(`[${reqId}] 📬 Brevo response status`, res.status);
-
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    console.log(`[${reqId}] ❌ Brevo error body`, body);
-    throw new Error(`Brevo failed ${res.status}`);
+    const body = await res.text();
+    throw new Error(`Brevo failed ${res.status}: ${body}`);
   }
-
-  console.log(`[${reqId}] ✅ Brevo email sent`);
 }
