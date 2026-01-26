@@ -1,5 +1,7 @@
 import PostalMime from 'postal-mime';
 
+/* ---------------- types ---------------- */
+
 interface ForwardableEmailMessage {
   from: string;
   to: string;
@@ -18,27 +20,51 @@ interface Env {
   BREVO_FROM_EMAIL: string;
 }
 
+/* ---------------- config ---------------- */
+
 const CONFIG = {
   SCREENSHOT_DELAY: 4,
-  FETCH_TIMEOUT: 15000,
+  FETCH_TIMEOUT: 15_000,
   BASE64_CHUNK_SIZE: 0x8000,
   MAX_EMAIL_SIZE: 10 * 1024 * 1024,
   MAX_BREVO_BASE64_CHARS: 9_500_000,
 } as const;
 
+/* ================= worker ================= */
+
 export default {
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext) {
+    const reqId = crypto.randomUUID();
+    const log = (...a: any[]) => console.log(`[${reqId}]`, ...a);
+
+    log('📨 EMAIL RECEIVED');
+    log('From:', message.from);
+    log('To:', message.to);
+    log('Raw size:', message.rawSize);
+
     try {
+      // ---------- env validation ----------
+      log('🔎 Checking env vars');
+      if (!env.SCREENSHOT_API_BASE) log('❌ SCREENSHOT_API_BASE missing');
+      if (!env.BREVO_API_KEY) log('❌ BREVO_API_KEY missing');
+      if (!env.BREVO_FROM_EMAIL) log('❌ BREVO_FROM_EMAIL missing');
+
       if (!env.SCREENSHOT_API_BASE || !env.BREVO_API_KEY || !env.BREVO_FROM_EMAIL) {
         throw new Error('Missing env vars');
       }
 
+      // ---------- size check ----------
       if (message.rawSize > CONFIG.MAX_EMAIL_SIZE) {
+        log('❌ Email too large, rejecting');
         throw new Error('Email too large');
       }
 
-      // ---------- Parse MIME ----------
+      // ---------- parse MIME ----------
+      log('📦 Reading raw email stream');
       const raw = await readStream(message.raw);
+      log('📦 Raw bytes read:', raw.length);
+
+      log('🧵 Parsing MIME');
       const parser = new PostalMime();
       const email = await parser.parse(raw);
 
@@ -46,97 +72,169 @@ export default {
       const from = extractEmail(email.from?.address || message.from);
       const device = detectDevice(subject);
 
+      log('✉️ Parsed fields:', { subject, from, device });
+
       const bodyText = email.text || '';
       const bodyHtml = email.html || '';
+
+      log('📝 Body sizes:', {
+        text: bodyText.length,
+        html: bodyHtml.length,
+      });
 
       const url =
         extractUrl(bodyText) ||
         extractUrl(stripHtml(bodyHtml));
 
       if (!url) {
+        log('⚠️ No URL found in email body');
         ctx.waitUntil(
           sendBrevo({
             env,
             to: from,
             subject: subject || device,
             text: 'No URL found in your email. Please include a valid link.',
+            reqId,
           })
         );
         return;
       }
 
+      log('🔗 Extracted URL:', url);
+
       const normalized = normalizeUrl(url);
+      if (!normalized) {
+        log('❌ URL normalization failed');
+      } else {
+        log('🌐 Normalized URL:', normalized.toString());
+      }
+
       if (!normalized || isPrivateHost(normalized.hostname)) {
+        log('🚫 URL blocked (invalid or private host)', normalized?.hostname);
         ctx.waitUntil(
           sendBrevo({
             env,
             to: from,
             subject: subject || device,
             text: 'The provided URL is invalid or not allowed.',
+            reqId,
           })
         );
         return;
       }
 
-      // ---------- Screenshot ----------
-      const screenshotUrl = new URL(env.SCREENSHOT_API_BASE);
-      screenshotUrl.pathname = screenshotUrl.pathname.replace(/\/$/, '') + '/take';
-      screenshotUrl.searchParams.set('url', normalized.toString());
-      screenshotUrl.searchParams.set('device', device);
-      screenshotUrl.searchParams.set('delay', CONFIG.SCREENSHOT_DELAY.toString());
-      screenshotUrl.searchParams.set('type', 'jpeg');
-      screenshotUrl.searchParams.set('fullPage', 'true');
+      // ---------- background work ----------
+      log('⏳ Deferring screenshot + email via waitUntil');
 
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), CONFIG.FETCH_TIMEOUT);
-
-      const res = await fetch(screenshotUrl.toString(), {
-        signal: controller.signal,
-        headers: { 'User-Agent': 'CF-Email-Screenshot/1.0' },
-      });
-
-      clearTimeout(timeout);
-
-      if (!res.ok) {
-        throw new Error(`Screenshot API failed ${res.status}`);
-      }
-
-      const imageBuffer = await res.arrayBuffer();
-      const imageBase64 = arrayBufferToBase64(imageBuffer);
-
-      if (imageBase64.length > CONFIG.MAX_BREVO_BASE64_CHARS) {
-        ctx.waitUntil(
-          sendBrevo({
-            env,
-            to: from,
-            subject: subject || device,
-            text: 'Screenshot too large to send by email. Try "mobile" or "tablet".',
-          })
-        );
-        return;
-      }
-
-      // ---------- Send email ----------
       ctx.waitUntil(
-        sendBrevo({
+        processScreenshotAndSend({
           env,
-          to: from,
-          subject: subject || device,
-          text: `Here is your screenshot.\n\nDevice: ${device}\nURL: ${normalized}`,
-          attachment: {
-            content: imageBase64,
-            name: `screenshot-${device}.jpeg`,
-            type: 'image/jpeg',
-          },
+          from,
+          subject,
+          device,
+          normalized,
+          reqId,
         })
       );
+
+      log('✅ Email handler finished (background running)');
     } catch (err) {
-      console.error('Worker error:', err);
+      log('🔥 WORKER ERROR', err);
     }
   },
 };
 
-/* ---------------- helpers ---------------- */
+/* ================= background ================= */
+
+async function processScreenshotAndSend({
+  env,
+  from,
+  subject,
+  device,
+  normalized,
+  reqId,
+}: {
+  env: Env;
+  from: string;
+  subject: string;
+  device: 'desktop' | 'tablet' | 'mobile';
+  normalized: URL;
+  reqId: string;
+}) {
+  const log = (...a: any[]) => console.log(`[${reqId}]`, ...a);
+
+  log('📸 Starting screenshot job');
+  log('Device:', device);
+  log('URL:', normalized.toString());
+
+  // ---------- screenshot ----------
+  const screenshotUrl = new URL(env.SCREENSHOT_API_BASE);
+  screenshotUrl.pathname = screenshotUrl.pathname.replace(/\/$/, '') + '/take';
+  screenshotUrl.searchParams.set('url', normalized.toString());
+  screenshotUrl.searchParams.set('device', device);
+  screenshotUrl.searchParams.set('delay', CONFIG.SCREENSHOT_DELAY.toString());
+  screenshotUrl.searchParams.set('type', 'jpeg');
+  screenshotUrl.searchParams.set('fullPage', 'true');
+
+  log('🛰 Screenshot API URL:', screenshotUrl.toString());
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    log('⏰ Screenshot fetch timeout');
+    controller.abort();
+  }, CONFIG.FETCH_TIMEOUT);
+
+  const res = await fetch(screenshotUrl.toString(), {
+    signal: controller.signal,
+    headers: { 'User-Agent': 'CF-Email-Screenshot/1.0' },
+  });
+
+  clearTimeout(timeout);
+
+  log('📡 Screenshot response:', res.status);
+
+  if (!res.ok) {
+    throw new Error(`Screenshot API failed ${res.status}`);
+  }
+
+  const imageBuffer = await res.arrayBuffer();
+  log('🖼 Screenshot bytes:', imageBuffer.byteLength);
+
+  const imageBase64 = arrayBufferToBase64(imageBuffer);
+  log('🧬 Base64 length:', imageBase64.length);
+
+  if (imageBase64.length > CONFIG.MAX_BREVO_BASE64_CHARS) {
+    log('⚠️ Screenshot too large for Brevo');
+    await sendBrevo({
+      env,
+      to: from,
+      subject: subject || device,
+      text: 'Screenshot too large to send by email. Try "mobile" or "tablet".',
+      reqId,
+    });
+    return;
+  }
+
+  // ---------- send email ----------
+  log('📤 Sending email via Brevo');
+
+  await sendBrevo({
+    env,
+    to: from,
+    subject: subject || device,
+    text: `Here is your screenshot.\n\nDevice: ${device}\nURL: ${normalized}`,
+    attachment: {
+      content: imageBase64,
+      name: `screenshot-${device}.jpeg`,
+      type: 'image/jpeg',
+    },
+    reqId,
+  });
+
+  log('✅ Screenshot email sent successfully');
+}
+
+/* ================= helpers ================= */
 
 async function readStream(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
   const reader = stream.getReader();
@@ -167,7 +265,6 @@ function extractEmail(input: string): string {
   return m ? m[0] : input;
 }
 
-/* 🔁 UPDATED: accepts any reasonable URL */
 function extractUrl(text: string): string | null {
   if (!text) return null;
 
@@ -196,17 +293,12 @@ function detectDevice(subject: string): 'desktop' | 'tablet' | 'mobile' {
   return (m?.[1] as any) || 'desktop';
 }
 
-/* 🔁 UPDATED: auto-adds https:// */
 function normalizeUrl(input: string): URL | null {
   try {
     let url = input.trim();
-    if (!/^[a-z]+:\/\//i.test(url)) {
-      url = 'https://' + url;
-    }
-
+    if (!/^[a-z]+:\/\//i.test(url)) url = 'https://' + url;
     const parsed = new URL(url);
     if (!['http:', 'https:'].includes(parsed.protocol)) return null;
-
     return parsed;
   } catch {
     return null;
@@ -241,13 +333,17 @@ async function sendBrevo({
   subject,
   text,
   attachment,
+  reqId,
 }: {
   env: Env;
   to: string;
   subject: string;
   text: string;
   attachment?: { content: string; name: string; type: string };
+  reqId: string;
 }) {
+  console.log(`[${reqId}] 📧 Brevo send start`, { to, subject });
+
   const payload: any = {
     sender: { email: env.BREVO_FROM_EMAIL, name: 'Screenshot Service' },
     replyTo: { email: env.BREVO_FROM_EMAIL, name: 'Screenshot Service' },
@@ -256,7 +352,13 @@ async function sendBrevo({
     textContent: text,
   };
 
-  if (attachment) payload.attachment = [attachment];
+  if (attachment) {
+    payload.attachment = [attachment];
+    console.log(`[${reqId}] 📎 Attachment added`, {
+      name: attachment.name,
+      size: attachment.content.length,
+    });
+  }
 
   const res = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
@@ -267,7 +369,13 @@ async function sendBrevo({
     body: JSON.stringify(payload),
   });
 
+  console.log(`[${reqId}] 📬 Brevo response status`, res.status);
+
   if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.log(`[${reqId}] ❌ Brevo error body`, body);
     throw new Error(`Brevo failed ${res.status}`);
   }
+
+  console.log(`[${reqId}] ✅ Brevo email sent`);
 }
