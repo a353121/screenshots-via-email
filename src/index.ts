@@ -23,8 +23,8 @@ interface Env {
 /* ---------------- config ---------------- */
 
 const CONFIG = {
-  SCREENSHOT_DELAY: 4,
-  FETCH_TIMEOUT: 15_000,
+  SCREENSHOT_DELAY: 5,
+  FETCH_TIMEOUT: 45_000,
   BASE64_CHUNK_SIZE: 0x8000,
   MAX_EMAIL_SIZE: 10 * 1024 * 1024,
   MAX_BREVO_BASE64_CHARS: 9_500_000,
