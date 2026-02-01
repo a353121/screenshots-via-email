@@ -1,4 +1,4 @@
-name = "my-personal-screenshot-via-email"
+name = "screenshots-via-email"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 # Optional: account_id = "..." # This can be automatically fetched or set as an environment variable
