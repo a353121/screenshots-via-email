@@ -33,6 +33,10 @@ const CONFIG = {
 /* ================= worker ================= */
 
 export default {
+  async fetch() {
+    return new Response('Email-only worker', { status: 200 });
+  },
+
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext) {
     const reqId = crypto.randomUUID();
     const log = (...a: any[]) => console.log(`[${reqId}]`, ...a);
