@@ -20,4 +20,4 @@ head_sampling_rate = 1
 [vars]
 BREVO_API_KEY="you brevo api it's safer to upload via cloudflare console after building"
 BREVO_FROM_EMAIL="Exapmle@Example.com"
-SCREENSHOT_API_URL="https://api.screen-shot.xyz"
+SCREENSHOT_API_BASE="https://api.screen-shot.xyz"
