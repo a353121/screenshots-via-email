@@ -128,6 +128,6 @@ https://www.RenderMail.us.kg
 
 ---
 
-## Logo
+##
 
-<img width="1280" height="583" alt="RenderMail logo" src="https://github.com/a353121/screenshots-via-email/blob/main/RenderMail.logo.png" />
+[![RenderMail](https://github.com/a353121/screenshots-via-email/blob/main/RenderMail.logo.png)](https://www.rendermail.us.kg)
