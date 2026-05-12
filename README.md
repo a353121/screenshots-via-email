@@ -12,7 +12,7 @@
 > terms of the GNU AGPL v3.0.
 
 Screenshot via Email is a Cloudflare-based service that captures website screenshots and delivers them via email.  
-It uses Cloudflare Email Routing, Brevo’s Email API, and a Cloudflare screenshot worker compatible with `screen-shot.xyz`.
+It uses Cloudflare Email Routing, Brevo’s Email API, and a Cloudflare screenshot worker (compatible with `screen-shot.xyz`).
 
 ---
 
@@ -54,10 +54,12 @@ Example:
 ## Screenshot API
 
 This project uses a screenshot API compatible with  
-[screen-shot.xyz](https://api.screen-shot.xyz).
+[api.screen-shot.xyz](https://api.screen-shot.xyz)  
+**"Not live anymore"**
 
 You may:
-
+>The public API Isn't working anymore so you have to deploy it yourself,  
+>The free cloudflare workers plan gets you **5 hours** of headless browsing time.
 - Use the public API, or
 - Deploy your own Cloudflare Worker using  
   https://github.com/Hassanrkbiz/cloudflare-screenshot-api  
