@@ -19,9 +19,13 @@ It uses Cloudflare Email Routing, Brevo’s Email API, and a Cloudflare screensh
 ## Features
 
 - Capture website screenshots via email requests
+- Full power of [vercel-screenshotter](https://vercel-screenshotter-samweiss.vercel.app) API (by [samweiss](https://gitlab.com/samweiss/vercel-screenshotter))
+- Support for multiple capture modes: viewport, full page, chunks, element, region, multi-device
+- PDF, PNG, JPEG, WebP output formats
+- Custom CSS injection, auto-scroll, inspection, and more
+- Simple command syntax in email subject/body
 - Serverless architecture using Cloudflare Workers
 - Email delivery powered by Brevo
-- Supports self-hosted screenshot workers
 
 ---
 
@@ -41,32 +45,54 @@ The following environment variables are required:
 
 - `BREVO_API_KEY` — Your Brevo API key  
 - `BREVO_FROM_EMAIL` — Sender email address used by Brevo  
-- `SCREENSHOT_API_BASE` — Base URL of the screenshot API  
+- `SCREENSHOT_API_BASE` — Base URL of the screenshot API (e.g., https://vercel-screenshotter-samweiss.vercel.app)  
+- `SCREENSHOT_API_TOKEN` — (Optional) Bearer token if your deployed API requires authentication  
 
 Example:
 
     BREVO_API_KEY=your_brevo_api_key
     BREVO_FROM_EMAIL=sender@example.com
-    SCREENSHOT_API_BASE=https://your-screenshot-worker-url
+    SCREENSHOT_API_BASE=https://vercel-screenshotter-samweiss.vercel.app
+    SCREENSHOT_API_TOKEN=your_token_if_required
 
 ---
 
 ## Screenshot API
 
-This project uses a screenshot API compatible with  
-[api.screen-shot.xyz](https://api.screen-shot.xyz)  
-**"Not live anymore"**
+This project uses the powerful [vercel-screenshotter](https://vercel-screenshotter-samweiss.vercel.app) API by [samweiss/vercel-screenshotter](https://gitlab.com/samweiss/vercel-screenshotter).
 
-You may:
->The public API Isn't working anymore so you have to deploy it yourself,  
->The free cloudflare workers plan gets you **5 hours** of headless browsing time.
-- Use the public API, or
-- Deploy your own Cloudflare Worker using  
-  https://github.com/Hassanrkbiz/cloudflare-screenshot-api  
-  and configure `SCREENSHOT_API_BASE` with your worker’s URL
+- Use the public instance: [vercel-screenshotter-samweiss.vercel.app](https://vercel-screenshotter-samweiss.vercel.app)
+- Or deploy your own instance following [vercel-screenshotter docs](https://gitlab.com/samweiss/vercel-screenshotter)
+- Configure `SCREENSHOT_API_BASE` with your API's base URL
 
 ---
 
+
+
+## Email Command Syntax
+
+You can control screenshot options by adding commands to the email subject or body:
+
+- **Device**: `desktop`, `mobile`, `tablet`, `iphone`, `ipad`, `laptop`
+- **Mode**: `full page`, `chunks` (chunked), `element`, `region`, `multi-device`
+- **Format**: `format png` / `format jpeg` / `format webp` / `format pdf`
+- **Dimensions**: `1920x1080` to set custom viewport size
+- **Wait**: `wait 5000` (milliseconds)
+- **Quality**: `quality 90` (0-100, for JPEG/WebP)
+- **Inspect**: `inspect` or `inspect only`
+- **Auto scroll**: `auto scroll` or `lazy` (load lazy content)
+- **CSS**: Add `css:` followed by CSS rules to inject custom styles
+
+### Examples
+
+1. Simple: Just email a URL - gets desktop full-page JPEG by default
+2. Mobile: Subject "mobile full page" with URL in body
+3. Custom size: "1920x1080 format png" 
+4. Chunks: "chunks" for long pages split into multiple images
+5. Element: "element selector .hero" to capture specific element
+6. With CSS: Add `css: body { background: white !important; }` in body
+
+Just include the URL in the email body - it will be extracted automatically.
 ## How It Works
 
 1. Incoming emails are handled by Cloudflare Email Routing
@@ -81,7 +107,7 @@ You may:
 - Cloudflare Workers
 - Cloudflare Email Routing
 - Brevo Email API
-- screen-shot.xyz compatible screenshot API
+- [vercel-screenshotter](https://vercel-screenshotter-samweiss.vercel.app) API by [samweiss](https://gitlab.com/samweiss/vercel-screenshotter) (full-featured browser capture)
 
 ---
 

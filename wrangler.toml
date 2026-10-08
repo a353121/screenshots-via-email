@@ -22,4 +22,5 @@ head_sampling_rate = 1
 # via the Cloudflare dashboard
 BREVO_API_KEY = "your-brevo-api-key"
 BREVO_FROM_EMAIL = "example@example.com"
-SCREENSHOT_API_BASE = "https://api.screen-shot.xyz"
+SCREENSHOT_API_BASE = "https://vercel-screenshotter-samweiss.vercel.app"
+SCREENSHOT_API_TOKEN = ""
