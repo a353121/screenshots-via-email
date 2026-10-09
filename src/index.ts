@@ -22,7 +22,7 @@ interface Env {
 }
 
 interface ScreenshotOptions {
-  url: string;
+  url?: string;
   format?: 'png' | 'jpg' | 'jpeg' | 'webp' | 'pdf';
   mode?: 'viewport' | 'fullPage' | 'fullPageChunks' | 'element' | 'region' | 'multiDevice';
   device?: string;
@@ -62,6 +62,35 @@ const CONFIG = {
   MAX_BREVO_BASE64_CHARS: 9_500_000,
 } as const;
 
+const HELP_TEXT = `Hey! Here's how to use this service.
+
+1) Put a link in the email body (or subject).
+2) Optionally add simple keywords to control the capture.
+3) You'll get the screenshot back by email in a few seconds.
+
+Examples
+  https://example.com
+  mobile full page
+  1920x1080 format pdf
+  chunks
+  element selector .hero
+  multi-device
+  auto scroll
+  wait 5s
+  quality 90
+  hide .cookie-banner
+
+Commands (use any combination)
+  Device : desktop, laptop, mobile, tablet, iphone, ipad, pixel
+  Mode   : full page, viewport, chunks, element, region, multi-device
+  Format : png, jpg, webp, pdf
+  Size   : 1920x1080  (or "width 1920" / "height 1080")
+  Timing : wait 5s, auto scroll
+  Polish : quality 90, hide .banner, remove #ads, inspect
+  CSS    : add a line starting with "css:" followed by your rules
+
+Reply with a link to get started!`;
+
 /* ================= worker ================= */
 
 export default {
@@ -93,13 +122,13 @@ export default {
 
       const body = email.text || stripHtml(email.html || '');
 
-      const url = extractUrl(body);
+      const url = extractUrl(body) || extractUrl(subject);
       if (!url) {
         ctx.waitUntil(sendBrevo({
           env,
           to: from,
-          subject: subject || 'Screenshot Request',
-          text: 'No URL found in your email. Please include a URL in the email body.',
+          subject: subject || 'How to use Screenshot via Email',
+          text: HELP_TEXT,
         }));
         return;
       }
@@ -418,62 +447,174 @@ function buildPayload(url: string, options: ScreenshotOptions) {
 
 function parseOptions(subject: string, body: string): ScreenshotOptions {
   const opts: ScreenshotOptions = {};
-  const combined = `${subject}\n${body}`.toLowerCase();
 
-  const deviceMatch = combined.match(/\b(desktop|tablet|mobile|iphone|ipad|pixel|laptop|computer|phone)\b/i);
+  const raw = `${subject}\n${body}`;
+
+  // Split off the custom CSS block so CSS values (e.g. "width: 100px")
+  // are never mistaken for commands.
+  let cssPart = '';
+  let commandSource = raw;
+  const cssIndex = raw.search(/\bcss\s*:/i);
+  if (cssIndex !== -1) {
+    cssPart = raw.slice(cssIndex).replace(/^\s*css\s*:\s*/i, '').trim();
+    commandSource = raw.slice(0, cssIndex);
+  }
+
+  // Drop URLs so bare keywords like "pdf" or "png" in links are ignored.
+  const commandText = commandSource
+    .replace(/https?:\/\/[^\s<>"']+/gi, ' ')
+    .replace(/\bwww\.[^\s<>"']+/gi, ' ');
+  const combined = commandText.toLowerCase();
+
+  /* ---------- device ---------- */
+  const deviceMatch = combined.match(
+    /\b(desktop|macbook|laptop|computer|tablet|mobile|iphone|ipad|pixel|android|phone)\b/
+  );
   if (deviceMatch) {
-    const d = deviceMatch[1].toLowerCase();
     const map: Record<string, string> = {
-      'desktop': 'desktop-1080p',
-      'laptop': 'laptop',
-      'computer': 'Computer',
-      'tablet': 'ipad',
-      'mobile': 'iphone',
-      'iphone': 'iphone',
-      'ipad': 'ipad',
-      'pixel': 'pixel',
-      'phone': 'Phone',
+      desktop: 'desktop-1080p',
+      computer: 'Computer',
+      laptop: 'laptop',
+      macbook: 'laptop',
+      tablet: 'ipad',
+      mobile: 'iphone',
+      iphone: 'iphone',
+      ipad: 'ipad',
+      pixel: 'pixel',
+      android: 'pixel',
+      phone: 'Phone',
     };
-    opts.device = map[d] || d;
+    opts.device = map[deviceMatch[1]] || deviceMatch[1];
   }
 
-  if (/\b(full\s*page|fullpage)\b/i.test(combined)) {
+  /* ---------- capture mode ---------- */
+  if (/\b(full[\s-]?page|fullpage|entire[\s-]?page|whole[\s-]?page)\b/.test(combined)) {
     opts.mode = 'fullPage';
-  } else if (/\b(chunks?|chunked)\b/i.test(combined)) {
+  } else if (/\b(chunks?|chunked|slices?)\b/.test(combined)) {
     opts.mode = 'fullPageChunks';
-  } else if (/\b(element|selector)\b/i.test(combined)) {
-    opts.mode = 'element';
-    const sel = body.match(/selector[:\s]+(.+?)(?:\n|$)/i);
-    if (sel) opts.selector = sel[1].trim();
-  } else if (/\b(region|crop)\b/i.test(combined)) {
-    opts.mode = 'region';
-  } else if (/\b(multi|multidevice)\b/i.test(combined)) {
+  } else if (/\b(multi[\s-]?device|multidevice|all[\s-]?devices|devices)\b/.test(combined)) {
     opts.mode = 'multiDevice';
+  } else if (/\b(region|crop|area)\b/.test(combined)) {
+    opts.mode = 'region';
+  } else if (/\b(elements?|selectors?|components?)\b/.test(combined)) {
+    opts.mode = 'element';
+  } else if (/\b(viewport|visible|above[\s-]?the[\s-]?fold)\b/.test(combined)) {
+    opts.mode = 'viewport';
   }
 
-  const fmt = combined.match(/\b(format[:\s]+(png|jpg|jpeg|webp|pdf))\b/i);
-  if (fmt) opts.format = fmt[2].toLowerCase() as any;
-
-  const wait = combined.match(/\b(wait[:\s]+(\d+))\b/i);
-  if (wait) opts.wait = parseInt(wait[2]);
-
-  const qual = combined.match(/\b(quality[:\s]+(\d+))\b/i);
-  if (qual) opts.quality = Math.min(100, Math.max(0, parseInt(qual[2])));
-
-  const wh = combined.match(/\b(\d+)\s*x\s*(\d+)\b/i);
-  if (wh) {
-    opts.width = parseInt(wh[1]);
-    opts.height = parseInt(wh[2]);
+  /* ---------- element selector ---------- */
+  const selectorMatch = commandText.match(
+    /(?:selectors?|elements?|components?|capture)\s*[:=]?\s*([.#][^\s,;:]+|[a-z][\w-]*(?:\.[\w-]+)?)/i
+  );
+  if (selectorMatch) {
+    opts.selector = selectorMatch[1].trim();
+    if (!opts.mode) opts.mode = 'element';
   }
 
-  if (/\binspect\b/i.test(combined)) opts.inspect = true;
-  if (/\binspect\s*only\b/i.test(combined)) opts.inspectOnly = true;
-  if (/\b(auto\s*scroll|lazy)\b/i.test(combined)) opts.autoScroll = true;
+  /* ---------- region coordinates (x,y,w,h) ---------- */
+  const region = combined.match(
+    /\b(?:region|crop|area)\s*[:=]?\s*(\d+)\s*[,x×\s]\s*(\d+)\s*[,x×\s]\s*(\d+)\s*[,x×\s]\s*(\d+)/i
+  );
+  if (region) {
+    opts.mode = 'region';
+    opts.region = {
+      x: +region[1],
+      y: +region[2],
+      width: +region[3],
+      height: +region[4],
+    };
+  }
 
-  const css = body.match(/css:\n?([\s\S]+?)(?:\n\n|\n[A-Z][A-Z\s]+:|$)/i);
-  if (css) opts.css = css[1].trim();
+  /* ---------- output format (bare or "format ...") ---------- */
+  const fmt = combined.match(/\b(?:format\s*[:=]?\s*)?(png|jpe?g|webp|pdf)\b/);
+  if (fmt) opts.format = (fmt[1] === 'jpg' ? 'jpeg' : fmt[1]) as ScreenshotOptions['format'];
+
+  /* ---------- viewport size ---------- */
+  let size = commandText.match(
+    /\b(?:size|viewport|resolution|dimensions?)\s*[:=]?\s*(\d{2,5})\s*[x×]\s*(\d{2,5})/i
+  );
+  if (!size) size = commandText.match(/\b(\d{2,5})\s*[x×]\s*(\d{2,5})\b/);
+  if (size) {
+    opts.width = +size[1];
+    opts.height = +size[2];
+  }
+  const wOnly = commandText.match(/\bwidth\s*[:=]?\s*(\d{2,5})\b/i);
+  if (wOnly) opts.width = +wOnly[1];
+  const hOnly = commandText.match(/\bheight\s*[:=]?\s*(\d{2,5})\b/i);
+  if (hOnly) opts.height = +hOnly[1];
+
+  /* ---------- wait / delay ---------- */
+  const wait = combined.match(
+    /\b(?:wait|delay|sleep)\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(ms|milliseconds?|s|sec(?:onds?)?)?\b/
+  );
+  if (wait) {
+    const value = parseFloat(wait[1]);
+    const unit = (wait[2] || 'ms').toLowerCase();
+    opts.wait = Math.round(unit.startsWith('s') ? value * 1000 : value);
+  }
+
+  /* ---------- quality ---------- */
+  const qual = combined.match(/\bquality\s*[:=]?\s*(\d{1,3})\b/);
+  if (qual) opts.quality = Math.min(100, Math.max(0, parseInt(qual[1])));
+
+  /* ---------- inspect ---------- */
+  if (/\binspect\s*only\b/.test(combined)) {
+    opts.inspect = true;
+    opts.inspectOnly = true;
+  } else if (/\binspect\s*all\b/.test(combined)) {
+    opts.inspect = true;
+    opts.inspectMode = 'all';
+  } else if (/\binspect(?:ion)?\b/.test(combined)) {
+    opts.inspect = true;
+  }
+
+  /* ---------- auto scroll / lazy loading ---------- */
+  if (/\b(auto[\s-]?scroll|scroll|lazy(?:[\s-]?load)?)\b/.test(combined)) {
+    opts.autoScroll = true;
+  }
+
+  /* ---------- hide / remove elements ---------- */
+  const hide = commandText.match(/\bhide\s*[:=]?\s*([^\n]+)/i);
+  if (hide) opts.hide = splitSelectors(hide[1]);
+
+  const remove = commandText.match(/\bremove\s*[:=]?\s*([^\n]+)/i);
+  if (remove) opts.remove = splitSelectors(remove[1]);
+
+  /* ---------- chunk options ---------- */
+  const chunkPreset = combined.match(/\bchunk\s*preset\s*[:=]?\s*([\w-]+)/);
+  if (chunkPreset) opts.chunkPreset = chunkPreset[1];
+  const chunkOverlap = combined.match(/\bchunk\s*overlap\s*[:=]?\s*(\d+)/);
+  if (chunkOverlap) opts.chunkOverlap = +chunkOverlap[1];
+  const chunkOutput = combined.match(/\bchunk\s*output\s*[:=]?\s*(separate|stitched|single)\b/);
+  if (chunkOutput) {
+    opts.chunkOutput = (chunkOutput[1] === 'single' ? 'stitched' : chunkOutput[1]) as ScreenshotOptions['chunkOutput'];
+  } else if (/\b(?:stitched?|single\s*(?:image|file|picture))\b/.test(combined)) {
+    opts.chunkOutput = 'stitched';
+  } else if (/\b(?:separate|individual)\b/.test(combined)) {
+    opts.chunkOutput = 'separate';
+  }
+  if (opts.chunkOutput && !opts.mode) opts.mode = 'fullPageChunks';
+  const chunkFormat = combined.match(/\bchunk\s*format\s*[:=]?\s*(png|jpe?g|webp|pdf)\b/);
+  if (chunkFormat) opts.chunkFormat = (chunkFormat[1] === 'jpg' ? 'jpeg' : chunkFormat[1]) as ScreenshotOptions['chunkFormat'];
+
+  /* ---------- delivery ---------- */
+  if (/\b(zip|download)\b/.test(combined)) opts.delivery = 'zip';
+
+  /* ---------- scripts ---------- */
+  if (/\ballow\s*scripts?\b/.test(combined)) opts.allowScript = true;
+  if (/\b(?:no|disable|without)\s*scripts?\b/.test(combined)) opts.allowScript = false;
+
+  /* ---------- custom CSS ---------- */
+  if (cssPart) opts.css = cssPart;
 
   return opts;
+}
+
+function splitSelectors(input: string): string[] {
+  return input
+    .split(/[,\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 function getExtensionFromFormat(fmt?: string) {
